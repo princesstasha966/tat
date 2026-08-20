@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JS Retro Racer</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background: #111;
+      color: #fff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    #game-container {
+      position: relative;
+      width: 800px;
+      height: 600px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      display: block;
+    }
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      right: 20px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 24px;
+      font-weight: bold;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+      pointer-events: none;
+    }
+    #controls-hint {
+      margin-top: 15px;
+      color: #888;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <div id="hud">
+    <div>SPEED: <span id="speed">0</span> KM/H</div>
+    <div>SCORE: <span id="score">0</span></div>
+  </div>
+  <canvas id="canvas" width="800" height="600"></canvas>
+</div>
+<div id="controls-hint">Use <b>LEFT / RIGHT</b> Arrows or <b>A / D</b> to steer | <b>UP / W</b> to Accelerate | <b>DOWN / S</b> to Brake</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const speedEl = document.getElementById('speed');
+const scoreEl = document.getElementById('score');
+
+// Game constants
+const width = 800;
+const height = 600;
+const roadWidth = 2000;
+const segmentLength = 200;
+const fov = 100;
+const cameraHeight = 1000;
+
+// Game state variables
+let playerX = 0;
+let speed = 0;
+const maxSpeed = 12000;
+const accel = 4000;
+const breaking = -8000;
+const decel = -2000;
+const offRoadDecel = -5000;
+let position = 0;
+let score = 0;
+
+const keys = { left: false, right: false, up: false, down: false };
+
+// Keyboard event listeners
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+  if (e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+  if (e.key === 'ArrowUp' || e.key === 'w') keys.up = true;
+  if (e.key === 'ArrowDown' || e.key === 's') keys.down = true;
+});
+
+window.addEventListener('keyup', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+  if (e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+  if (e.key === 'ArrowUp' || e.key === 'w') keys.up = false;
+  if (e.key === 'ArrowDown' || e.key === 's') keys.down = false;
+});
+
+// Generate track segments with curves
+const segments = [];
+const numSegments = 1600;
+
+for (let i = 0; i < numSegments; i++) {
+  let curve = 0;
+  if (i > 200 && i < 400) curve = 2;
+  if (i > 600 && i < 900) curve = -3;
+  if (i > 1100 && i < 1400) curve = 1.5;
+
+  segments.push({
+    index: i,
+    p1: { world: { y: 0, z: i * segmentLength }, camera: {}, screen: {} },
+    p2: { world: { y: 0, z: (i + 1) * segmentLength }, camera: {}, screen: {} },
+    curve: curve,
+    color: Math.floor(i / 3) % 2 ? 
+      { grass: '#106f10', rumble: '#fff', road: '#444' } : 
+      { grass: '#0d5c0d', rumble: '#e00', road: '#3b3b3b' }
+  });
+}
+
+const trackLength = segments.length * segmentLength;
+
+// Projection engine
+function project(p, cameraX, cameraY, cameraZ, cameraDepth) {
+  p.camera.x = (p.world.x || 0) - cameraX;
+  p.camera.y = (p.world.y || 0) - cameraY;
+  p.camera.z = (p.world.z || 0) - cameraZ;
+  
+  const scale = cameraDepth / p.camera.z;
+  p.screen.x = Math.round((width / 2) + (scale * p.camera.x * width / 2));
+  p.screen.y = Math.round((height / 2) - (scale * p.camera.y * height / 2));
+  p.screen.w = Math.round(scale * roadWidth * width / 2);
+}
+
+// Drawing helper
+function drawPolygon(x1, y1, w1, x2, y2, w2, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x1 - w1, y1);
+  ctx.lineTo(x2 - w2, y2);
+  ctx.lineTo(x2 + w2, y2);
+  ctx.lineTo(x1 + w1, y1);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Render player car
+function drawPlayer() {
+  const carW = 120;
+  const carH = 50;
+  const carX = width / 2 - carW / 2;
+  const carY = height - carH - 30;
+
+  // Car Body
+  ctx.fillStyle = '#e63946';
+  ctx.beginPath();
+  ctx.roundRect(carX, carY, carW, carH, [10, 10, 0, 0]);
+  ctx.fill();
+
+  // Cabin
+  ctx.fillStyle = '#1d3557';
+  ctx.fillRect(carX + 20, carY - 20, carW - 40, 25);
+
+  // Wheels
+  ctx.fillStyle = '#111';
+  ctx.fillRect(carX - 8, carY + carH - 20, 12, 20);
+  ctx.fillRect(carX + carW - 4, carY + carH - 20, 12, 20);
+
+  // Lights
+  ctx.fillStyle = '#ffb703';
+  ctx.fillRect(carX + 10, carY + carH - 12, 20, 8);
+  ctx.fillRect(carX + carW - 30, carY + carH - 12, 20, 8);
+}
+
+// Main game loop
+let lastTime = performance.now();
+
+function frame(now) {
+  const dt = Math.min(1, (now - lastTime) / 1000);
+  lastTime = now;
+
+  // Handle acceleration/deceleration
+  if (keys.up) speed += accel * dt;
+  else if (keys.down) speed += breaking * dt;
+  else speed += decel * dt;
+
+  // Steering
+  if (keys.left) playerX -= (speed / maxSpeed) * 2.5 * dt;
+  if (keys.right) playerX += (speed / maxSpeed) * 2.5 * dt;
+
+  // Off-road penalty
+  if ((playerX < -1 || playerX > 1) && speed > maxSpeed * 0.2) {
+    speed += offRoadDecel * dt;
+  }
+
+  // Clamp values
+  playerX = Math.max(-2, Math.min(2, playerX));
+  speed = Math.max(0, Math.min(maxSpeed, speed));
+
+  position = (position + speed * dt) % trackLength;
+  score += Math.floor(speed * dt * 0.1);
+
+  // Update HUD
+  speedEl.textContent = Math.floor((speed / maxSpeed) * 220);
+  scoreEl.textContent = score;
+
+  // Clear Canvas
+  ctx.clearRect(0, 0, width, height);
+
+  // Background sky & ground base
+  ctx.fillStyle = '#1e1b4b';
+  ctx.fillRect(0, 0, width, height / 2);
+  ctx.fillStyle = '#0d5c0d';
+  ctx.fillRect(0, height / 2, width, height / 2);
+
+  // Render track segments
+  const startPos = position;
+  const startIdx = Math.floor(startPos / segmentLength);
+  const cameraDepth = 1 / Math.tan((fov / 2) * Math.PI / 180);
+  
+  let x = 0;
+  let dx = 0;
+
+  for (let n = 0; n < 150; n++) {
+    const segment = segments[(startIdx + n) % segments.length];
+    const looped = segment.index < startIdx;
+    
+    segment.p1.world.z = (segment.index * segmentLength) - (looped ? -trackLength : 0);
+    segment.p2.world.z = ((segment.index + 1) * segmentLength) - (looped ? -trackLength : 0);
+
+    // Apply curve offsets
+    dx += segment.curve;
+    x += dx;
+
+    project(segment.p1, (playerX * roadWidth) - x, cameraHeight, startPos, cameraDepth);
+    project(segment.p2, (playerX * roadWidth) - x - dx, cameraHeight, startPos, cameraDepth);
+
+    // Render segment if visible
+    if (segment.p1.camera.z > cameraDepth && segment.p2.screen.y < segment.p1.screen.y) {
+      const p1 = segment.p1.screen;
+      const p2 = segment.p2.screen;
+
+      // Grass
+      ctx.fillStyle = segment.color.grass;
+      ctx.fillRect(0, p2.y, width, p1.y - p2.y);
+
+      // Rumble strip
+      drawPolygon(p1.x, p1.y, p1.w * 1.15, p2.x, p2.y, p2.w * 1.15, segment.color.rumble);
+      // Road
+      drawPolygon(p1.x, p1.y, p1.w, p2.x, p2.y, p2.w, segment.color.road);
+    }
+  }
+
+  drawPlayer();
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
